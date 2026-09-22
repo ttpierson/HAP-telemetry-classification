@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+data/new/
+models/
+
+# Telemetry traces are collected on a personal GPU and are not published.
+data/

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU workload classifier — live</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="banner" class="banner banner-unknown">
+  <span class="banner-tag">MODEL / MACHINE</span>
+  <span id="banner-text">connecting…</span>
+</div>
+
+<header>
+  <div class="title">
+    <h1>GPU workload classifier <span class="live-dot" id="live-dot"></span></h1>
+    <p class="sub" id="source-line">…</p>
+  </div>
+  <div class="controls">
+    <label class="ctl">
+      <span>Declare what this GPU is really doing</span>
+      <select id="mark-select">
+        <option value="">— not declared —</option>
+        <option value="idle">idle</option>
+        <option value="nbody_16384">non-ML compute (nbody)</option>
+        <option value="cufft_4096">non-ML compute (cuFFT)</option>
+        <option value="rendering_proxy">rendering</option>
+        <option value="infer_resnet18_bs64">ML inference</option>
+        <option value="train_resnet18_bs64">ML training</option>
+      </select>
+    </label>
+    <button id="reset-btn" class="btn">Reset books</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── current verdict ────────────────────────────────────────────────── -->
+  <section class="card verdict-card">
+    <h2>Current call <span class="hint">30 s window, reclassified every second</span></h2>
+    <div class="verdict-body">
+      <div class="verdict-main">
+        <div id="verdict-class" class="verdict-class">—</div>
+        <div id="verdict-conf" class="verdict-conf">waiting for the window to fill</div>
+      </div>
+      <div id="prob-bars" class="prob-bars"></div>
+    </div>
+    <div class="fillbar-wrap">
+      <div class="fillbar"><div id="fillbar" class="fillbar-in"></div></div>
+      <span id="fill-label" class="hint">window 0 / 30 s</span>
+    </div>
+  </section>
+
+  <!-- ── same window, two models ────────────────────────────────────────── -->
+  <section class="card" id="compare-card" hidden>
+    <h2>Same window, two models
+      <span class="hint">identical telemetry, identical features — the only difference is what each one was trained on</span>
+    </h2>
+    <div class="compare-body">
+      <div class="compare-side" id="compare-primary"></div>
+      <div class="compare-side" id="compare-secondary"></div>
+    </div>
+    <div class="compare-agree" id="compare-agree"></div>
+    <div class="chart-note" id="compare-note"></div>
+  </section>
+
+  <!-- ── which model is running ─────────────────────────────────────────── -->
+  <section class="card" id="modelid-card" hidden>
+    <h2>Which model is running?
+      <span class="hint">a second classifier, identifying the LLM from the same 30 s window</span>
+    </h2>
+    <div id="modelid-gate" class="modelid-gate"></div>
+    <div class="modelid-body">
+      <div class="modelid-main">
+        <div class="stat-label">telemetry says</div>
+        <div id="modelid-verdict" class="modelid-verdict">—</div>
+        <div id="modelid-truth" class="stat-detail"></div>
+      </div>
+      <div class="modelid-bars" id="modelid-bars"></div>
+    </div>
+    <div id="modelid-batch" class="modelid-batch"></div>
+    <div class="chart-note" id="modelid-note"></div>
+  </section>
+
+  <!-- ── panel 1: detection latency ─────────────────────────────────────── -->
+  <section class="card">
+    <h2>1 · Detection latency
+      <span class="hint">how long after a workload starts until the classifier is sure</span>
+    </h2>
+    <div class="latency-body">
+      <div class="latency-stat">
+        <div class="stat-label">time to confident call</div>
+        <div id="ttc-value" class="stat-value">—</div>
+        <div id="ttc-detail" class="stat-detail">no workload running</div>
+      </div>
+      <div class="latency-chart">
+        <svg id="latency-svg" viewBox="0 0 640 220"></svg>
+        <div class="chart-note">
+          Shaded: the trailing 30 s window still contains samples from before the
+          workload started. Confidence inside that band is partly the buffer
+          draining, not the model deciding.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── panel 2: transitions ───────────────────────────────────────────── -->
+  <section class="card">
+    <h2>2 · Workload transitions
+      <span class="hint">class probabilities over time, with declared truth underneath</span>
+    </h2>
+    <svg id="timeline-svg" viewBox="0 0 1000 260"></svg>
+    <div class="legend" id="timeline-legend"></div>
+    <div id="episode-list" class="episode-list"></div>
+  </section>
+
+  <!-- ── panel 3: false positives ───────────────────────────────────────── -->
+  <section class="card">
+    <h2>3 · False positives, accumulating
+      <span class="hint">spurious ml_training calls while the GPU is declared to be doing something else</span>
+    </h2>
+    <div class="ledger-body">
+      <div class="ledger-stats">
+        <div class="stat"><div class="stat-label">false alarms</div>
+          <div id="fp-count" class="stat-value stat-alarm">0</div>
+          <div id="fp-rate" class="stat-detail">—</div></div>
+        <div class="stat"><div class="stat-label">windows observed</div>
+          <div id="fp-obs" class="stat-value">0</div>
+          <div class="stat-detail">while declared not-training</div></div>
+        <div class="stat"><div class="stat-label">missed detections</div>
+          <div id="fp-miss" class="stat-value">0</div>
+          <div id="fp-miss-rate" class="stat-detail">while declared training</div></div>
+      </div>
+
+      <div class="basecalc">
+        <div class="basecalc-head">
+          <span>If training is</span>
+          <input type="range" id="base-slider" min="1" max="80" value="5">
+          <span id="base-value" class="basecalc-rate">5%</span>
+          <span>of GPU-time, this model's precision is</span>
+        </div>
+        <div id="precision-value" class="precision-value">—</div>
+        <div id="precision-detail" class="stat-detail"></div>
+        <svg id="precision-svg" viewBox="0 0 640 200"></svg>
+        <div class="chart-note" id="precision-note"></div>
+      </div>
+    </div>
+    <div class="fp-log" id="fp-log"></div>
+  </section>
+
+  <!-- ── raw signals ────────────────────────────────────────────────────── -->
+  <section class="card">
+    <h2>The nine signals the classifier reads
+      <span class="hint">last 120 s · shaded box is the 30 s window being classified right now</span>
+    </h2>
+    <div id="sparks" class="sparks"></div>
+  </section>
+
+  <!-- ── model card ─────────────────────────────────────────────────────── -->
+  <section class="card">
+    <h2>What this model is <span class="hint">and what it is not</span></h2>
+    <div id="modelcard" class="modelcard"></div>
+    <p class="disclaimer">
+      Research prototype. Trained on a small single-GPU-model corpus with no
+      adversarial workloads — nothing here is ground truth about what a GPU is
+      doing, only what one RandomForest infers from nine management-plane
+      signals.
+    </p>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
